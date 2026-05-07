@@ -1,0 +1,6 @@
+ignicoccus_hospitalis	Bacteria
+nitrosopumilus_maritimus	Archaea
+cereibacter_sphaeroides	Bacteria
+chloroflexus_aurantiacus	Bacteria
+hydrogenobacter_thermophilus	Bacteria
+Chlorobium_limicola	Bacteria

@@ -1,0 +1,650 @@
+#!/usr/bin/env python3
+
+import os
+import glob
+import shutil
+import argparse
+import multiprocessing as mp
+from datetime import datetime
+from distutils.spawn import find_executable
+
+
+detectCFP_usage = '''
+============================================== detectCFP example commands ==============================================
+
+# modules needed
+module load python/3.7.3
+module load perl/5.28.0
+module load blast+/2.9.0
+module load hmmer/3.3
+module load prodigal/2.6.3
+module load git/2.22.0
+module load bedtools/2.27.1
+module load glpk/4.65
+module load barrnap/0.9
+module load gcc/7.3.0
+module load exonerate/2.2.0
+module load parallel/20190522
+module unload R
+module load R/3.6.1
+module load cplex/12.9.0-academic  
+export PATH=/path/to/softwares/gapseq:$PATH
+
+# example commands
+# with fixed key enzyme completeness cut-off and pathway completeness cut-off, as specified in path2hmm.txt
+detectCFP -p DeepSea -g MAG_files -x fna -hmm keyEnzymes.hmm -k path2hmm.txt -t 12 -force -taxon MAG_taxonomy.txt 
+
+# with dynamic key enzyme completeness cut-off and fixed pathway completeness cut-off, requires genome completeness info
+detectCFP -p DeepSea -g MAG_files -x fna -hmm keyEnzymes.hmm -k path2hmm.txt -t 12 -force -taxon MAG_taxonomy.txt -dynamic_kecc -cpl MAG_cpl.txt 
+
+# with fixed key enzyme completeness cut-off and dynamic pathway completeness cut-off, requires genome completeness info
+detectCFP -p DeepSea -g MAG_files -x fna -hmm keyEnzymes.hmm -k path2hmm.txt -t 12 -force -taxon MAG_taxonomy.txt -dynamic_pcc -cpl MAG_cpl.txt 
+
+# with dynamic key enzyme completeness cut-off and pathway completeness cut-off, requires genome completeness info
+detectCFP -p DeepSea -g MAG_files -x fna -hmm keyEnzymes.hmm -k path2hmm.txt -t 12 -force -taxon MAG_taxonomy.txt -dynamic_kecc -dynamic_pcc -cpl MAG_cpl.txt
+
+#alex
+detectCFP -p DeepSea -g /mag_files -x fna -hmm pipeline_files/combined.hmm -k pipeline_files/pathwaysXhmmfiles.txt -t 12 -force -taxon MAG_taxonomy.txt -dynamic_pcc -cpl MAG_cpl.txt 
+
+
+========================================================================================================================
+'''
+
+
+def force_create_folder(folder_to_create):
+    if os.path.isdir(folder_to_create):
+        shutil.rmtree(folder_to_create, ignore_errors=True)
+        if os.path.isdir(folder_to_create):
+            shutil.rmtree(folder_to_create, ignore_errors=True)
+            if os.path.isdir(folder_to_create):
+                shutil.rmtree(folder_to_create, ignore_errors=True)
+                if os.path.isdir(folder_to_create):
+                    shutil.rmtree(folder_to_create, ignore_errors=True)
+    os.mkdir(folder_to_create)
+
+
+def report_and_log(message_for_report, log_file, keep_quiet):
+
+    time_format = '[%Y-%m-%d %H:%M:%S]'
+    with open(log_file, 'a') as log_handle:
+        log_handle.write('%s %s\n' % ((datetime.now().strftime(time_format)), message_for_report))
+
+    if keep_quiet is False:
+        print('%s %s' % ((datetime.now().strftime(time_format)), message_for_report))
+
+
+def sep_path_basename_ext(file_in):
+    file_path, file_name = os.path.split(file_in)
+    if file_path == '':
+        file_path = '.'
+    file_basename, file_extension = os.path.splitext(file_name)
+    return file_path, file_basename, file_extension
+
+
+def detectCFP(args):
+
+    ###################################################### file in/out #####################################################
+
+    output_prefix                    = args['p']
+    genome_folder                    = args['g']
+    genome_ext                       = args['x']
+    faa_folder                       = args['faa']
+    hmm_profiles                     = args['hmm']
+    hmm_evalue                       = args['e']
+    gapseq_bitscore                  = args['gapseq_b']
+    pwy_to_key_enzyme_file           = args['k']
+    dynamic_pcc                      = args['dynamic_pcc']
+    dynamic_kecc                     = args['dynamic_kecc']
+    mag_cpl_file                     = args['cpl']
+    mag_taxon_file                   = args['taxon']
+    num_threads                      = args['t']
+    force_overwrite                  = args['force']
+    gapseq_exe                       = args['gapseq']
+    keep_quiet                       = args['quiet']
+
+    str_connector                    = '_|_'
+
+    # define output file name
+    genome_folder_basename = genome_folder
+    if '/' in genome_folder:
+        genome_folder_basename = genome_folder.split('/')[-1]
+    if output_prefix == None:
+        output_prefix = genome_folder_basename
+
+    detectCFP_wd                                = '%s_detectCFP_wd'                % output_prefix
+    pwd_log_file                                = '%s/%s_%s.log'                   % (detectCFP_wd, output_prefix, datetime.now().strftime('%Y-%m-%d_%Hh-%Mm-%Ss_%f'))
+    prodigal_output_folder                      = '%s/%s_prodigal_output'          % (detectCFP_wd, output_prefix)
+    hmmsearch_output_folder                     = '%s/%s_hmmsearch_output'         % (detectCFP_wd, output_prefix)
+    gapseq_output_folder                        = '%s/%s_gapseq_output'            % (detectCFP_wd, output_prefix)
+    gapseq_output_folder_combined_Pathways      = '%s/%s_combined_Pathways'        % (gapseq_output_folder, output_prefix)
+    cmd_file_prodigal                           = '%s/%s_cmds_prodigal.txt'        % (detectCFP_wd, output_prefix)
+    cmd_file_hmmsearch                          = '%s/%s_cmds_hmmsearch.txt'       % (detectCFP_wd, output_prefix)
+    cmd_file_gapseq                             = '%s/%s_cmds_gapseq.txt'          % (detectCFP_wd, output_prefix)
+    output_df_1                                 = '%s/%s_detected_CFPs.1.txt'      % (detectCFP_wd, output_prefix)
+    output_df_2                                 = '%s/%s_detected_CFPs.2.txt'      % (detectCFP_wd, output_prefix)
+
+    # create folder
+    if (os.path.isdir(detectCFP_wd) is True) and (force_overwrite is False):
+        print('Output folder detected, program exited: %s' % detectCFP_wd)
+        exit()
+    else:
+        force_create_folder(detectCFP_wd)
+
+
+    ################################################ check dependencies ################################################
+
+    # check whether executables exist
+    program_list = ['hmmsearch', gapseq_exe]
+    if faa_folder is None:
+        program_list.append('prodigal')
+
+    not_detected_programs = []
+    for needed_program in program_list:
+        if find_executable(needed_program) is None:
+            not_detected_programs.append(needed_program)
+
+    if not_detected_programs != []:
+        print('%s not detected, program exited!' % ', '.join(not_detected_programs))
+        exit()
+
+
+    ################################################# check input files ################################################
+
+    genome_file_re = '%s/*.%s' % (genome_folder, genome_ext)
+    genome_file_list = [os.path.basename(file_name) for file_name in glob.glob(genome_file_re)]
+    genome_file_list_no_extension = ['.'.join(i.split('.')[:-1]) for i in genome_file_list]
+
+    # read in mag taxonomy
+    genome_taxon_dict = {}
+    if mag_taxon_file is None:
+        report_and_log(('Genome taxonomy not provided, all queries will be processed as bacterial genomes.'), pwd_log_file, keep_quiet)
+    else:
+        if os.path.isfile(mag_taxon_file) is False:
+            print('%s not found, program exited!')
+        else:
+            for each_genome in open(mag_taxon_file):
+                each_genome_split = each_genome.strip().split('\t')
+                if each_genome_split != ['']:
+                    genome_id = each_genome_split[0]
+                    genome_taxon = each_genome_split[1]
+                    if genome_taxon in ['Bacteria', 'bacteria', 'BACTERIA', 'Bacterial', 'bacterial', 'BACTERIAL']:
+                        genome_taxon = 'Bacteria'
+                    elif genome_taxon in ['Archaea', 'archaea', 'ARCHAEA', 'Archaeal', 'archaeal', 'ARCHAEAL']:
+                        genome_taxon = 'Archaea'
+                    else:
+                        print('Unrecognised genome domain (choose from Bacteria or Archaea), program exited!')
+                        exit()
+                    genome_taxon_dict[genome_id] = genome_taxon
+
+
+    if (dynamic_kecc is True) or (dynamic_pcc is True):
+        if mag_cpl_file is None:
+            print('Genome completeness file did not provide, program exited!')
+            exit()
+        elif os.path.isfile(mag_cpl_file) is False:
+            print('Genome completeness file not found, program exited!')
+            exit()
+
+    # read genome completeness into dict
+    genome_cpl_dict = {}
+    if (dynamic_kecc is True) or (dynamic_pcc is True):
+        for each_genome in open(mag_cpl_file):
+            each_genome_split = each_genome.strip().split('\t')
+            if each_genome_split != ['']:
+                genome_id = each_genome_split[0]
+                genome_cpl = float(each_genome_split[1])
+                genome_cpl_dict[genome_id] = genome_cpl
+
+    # report genomes without cpl info
+    if (dynamic_kecc is True) or (dynamic_pcc is True):
+
+        genomes_without_cpl_info = []
+        for input_genome in genome_file_list_no_extension:
+            if input_genome not in genome_cpl_dict:
+                genomes_without_cpl_info.append(input_genome)
+
+        if genomes_without_cpl_info != []:
+
+            print('Completeness info not found for the following genomes:')
+            print(','.join(genomes_without_cpl_info))
+            print('Completeness info not found for above genomes, program exited!')
+            exit()
+
+    if faa_folder is None:
+
+        # create folder
+        os.mkdir(prodigal_output_folder)
+
+        report_and_log(('Running prodigal for %s genomes with %s cores' % (len(genome_file_list_no_extension), num_threads)), pwd_log_file, keep_quiet)
+
+        # prepare argument list for prodigal worker
+        argument_list_for_prodigal_worker = []
+        cmd_file_prodigal_handle = open(cmd_file_prodigal, 'w')
+        cmd_file_prodigal_handle.write('cd %s\n' % os.getcwd())
+        for genome_file in genome_file_list_no_extension:
+            pwd_genome_file = '%s/%s.%s' % (genome_folder, genome_file, genome_ext)
+            prodigal_cmd = 'prodigal -i %s -o %s/%s.genes -a %s/%s.faa -p meta -q' % (pwd_genome_file, prodigal_output_folder, genome_file, prodigal_output_folder, genome_file)
+            cmd_file_prodigal_handle.write('%s\n' % prodigal_cmd)
+            argument_list_for_prodigal_worker.append(prodigal_cmd)
+        cmd_file_prodigal_handle.close()
+
+        # run prodigal with multiprocessing
+        pool = mp.Pool(processes=num_threads)
+        pool.map(os.system, argument_list_for_prodigal_worker)
+        pool.close()
+        pool.join()
+
+        report_and_log(('Commands for running prodigal exported to %s' % os.path.basename(cmd_file_prodigal)), pwd_log_file, keep_quiet)
+
+        intersect_file_list = genome_file_list_no_extension
+        faa_folder = prodigal_output_folder
+
+    else:
+        # get faa file list
+        faa_file_re = '%s/*.faa' % faa_folder
+        faa_file_list = [os.path.basename(file_name) for file_name in glob.glob(faa_file_re)]
+        faa_file_list_no_extension = ['.'.join(i.split('.')[:-1]) for i in faa_file_list]
+
+        # get file intersection
+        intersect_file_list = set(genome_file_list_no_extension).intersection(faa_file_list_no_extension)
+        if len(genome_file_list_no_extension) != len(intersect_file_list):
+            report_and_log(('Found %s genomes with provided faa file, will detect pathways on these genomes.' % len(intersect_file_list)), pwd_log_file, keep_quiet)
+
+
+    ########################################## read in pathway to key enzyme file ##########################################
+
+    # read in pathway to key enzyme file
+    pwy_to_key_enzyme_dict = {}
+    default_PwyCpl_cutoff_dict = {}
+    default_KeyEnzymeCpl_cutoff_dict = {}
+    for each_pathway in open(pwy_to_key_enzyme_file):
+        if not each_pathway.startswith('Pwy	KeyEnzyme'):
+            each_pathway_split = each_pathway.strip().split('\t')
+            pwy_id = each_pathway_split[0]
+            key_enzyme_str = each_pathway_split[1]
+            key_enzyme_list = key_enzyme_str.split(',')
+            PwyCpl = float(each_pathway_split[2])
+            KeyEnzymeCpl = float(each_pathway_split[3])
+
+            if pwy_id not in pwy_to_key_enzyme_dict:
+                pwy_to_key_enzyme_dict[pwy_id] = [key_enzyme_list]
+            else:
+                pwy_to_key_enzyme_dict[pwy_id].append(key_enzyme_list)
+
+            key_str = '%s%s%s' % (pwy_id, str_connector, key_enzyme_str)
+            default_PwyCpl_cutoff_dict[key_str] = PwyCpl
+            default_KeyEnzymeCpl_cutoff_dict[key_str] = KeyEnzymeCpl
+
+
+    # get genome specific key enzyme completeness cutoff
+    dynamic_KeyEnzymeCpl_cutoff_dict = {}
+    if dynamic_kecc is True:
+        for genome in intersect_file_list:
+
+            if genome not in genome_cpl_dict:
+                print('Genome completeness for %s not found, program exited!' % (genome))
+                exit()
+
+            current_genome_KeyEnzymeCpl_cutoff_dict = {}
+            for key_str in default_KeyEnzymeCpl_cutoff_dict:
+                adjusted_cutoff = (default_KeyEnzymeCpl_cutoff_dict[key_str]) * (genome_cpl_dict[genome])/100
+                current_genome_KeyEnzymeCpl_cutoff_dict[key_str] = adjusted_cutoff
+            dynamic_KeyEnzymeCpl_cutoff_dict[genome] = current_genome_KeyEnzymeCpl_cutoff_dict
+
+
+    # get genome specific pathway completeness cutoff
+    dynamic_PwyCpl_cutoff_dict = {}
+    if dynamic_pcc is True:
+        for genome in intersect_file_list:
+            current_genome_PwyCpl_cutoff_dict = {}
+            for key_str in default_PwyCpl_cutoff_dict:
+                adjusted_PwyCpl_cutoff = (default_PwyCpl_cutoff_dict[key_str]) * (genome_cpl_dict[genome])/100
+                current_genome_PwyCpl_cutoff_dict[key_str] = adjusted_PwyCpl_cutoff
+            dynamic_PwyCpl_cutoff_dict[genome] = current_genome_PwyCpl_cutoff_dict
+
+
+    ##################################################### hmmsearch ####################################################
+
+    report_and_log(('Running hmmsearch for %s genomes with %s cores' % (len(genome_file_list_no_extension), num_threads)), pwd_log_file, keep_quiet)
+
+    os.mkdir(hmmsearch_output_folder)
+
+    # prepare argument list for hmmsearch worker
+    cmd_file_hmmsearch_handle = open(cmd_file_hmmsearch, 'w')
+    cmd_file_hmmsearch_handle.write('cd %s\n' % os.getcwd())
+    argument_list_for_hmmsearch_worker = []
+    for each_faa in intersect_file_list:
+        pwd_faa = '%s/%s.faa' % (faa_folder, each_faa)
+        hmmsearch_cmd = 'hmmsearch -o /dev/null --domtblout %s/%s.tbl -E %s %s %s' % (hmmsearch_output_folder, each_faa, hmm_evalue, hmm_profiles, pwd_faa)
+        cmd_file_hmmsearch_handle.write('%s\n' % hmmsearch_cmd)
+        argument_list_for_hmmsearch_worker.append(hmmsearch_cmd)
+    cmd_file_hmmsearch_handle.close()
+
+    # run hmmsearch with multiprocessing
+    pool = mp.Pool(processes=num_threads)
+    pool.map(os.system, argument_list_for_hmmsearch_worker)
+    pool.close()
+    pool.join()
+
+    report_and_log(('Commands for running hmmsearch exported to %s' % os.path.basename(cmd_file_hmmsearch)), pwd_log_file, keep_quiet)
+
+    ############################################## parse hmmsearch outputs #############################################
+
+    mag_to_key_enzymes_dict = {}
+    for each_hmm_out in intersect_file_list:
+
+        pwd_hmm_out = '%s/%s.tbl' % (hmmsearch_output_folder, each_hmm_out)
+
+        detected_hmms = set()
+        for each_line in open(pwd_hmm_out):
+            if not each_line.startswith('#'):
+                each_line_split = each_line.strip().split(' ')
+                each_line_split_no_empty_element = []
+                for eachelement in each_line_split:
+                    if eachelement != '':
+                        each_line_split_no_empty_element.append(eachelement)
+                hmm_id = each_line_split_no_empty_element[3]
+                detected_hmms.add(hmm_id)
+        mag_to_key_enzymes_dict[each_hmm_out] = detected_hmms
+
+
+    mag_to_qualified_pwys_dict = {}
+    for mag in mag_to_key_enzymes_dict:
+
+        current_mag_KeyEnzymeCpl_cutoff = default_KeyEnzymeCpl_cutoff_dict
+        if dynamic_kecc is True:
+            current_mag_KeyEnzymeCpl_cutoff = dynamic_KeyEnzymeCpl_cutoff_dict[mag]
+
+        current_mag_detected_key_enzymes = mag_to_key_enzymes_dict[mag]
+        for pathway in pwy_to_key_enzyme_dict:
+            current_pathway_key_enzyme = pwy_to_key_enzyme_dict[pathway]
+            current_pathway_key_enzyme_qualified = []
+            for key_enzyme_group in current_pathway_key_enzyme:
+                key_enzyme_group_detected = set()
+                for key_enzyme in key_enzyme_group:
+                    if key_enzyme in current_mag_detected_key_enzymes:
+                        key_enzyme_group_detected.add(key_enzyme)
+
+                current_key_str = '%s%s%s' % (pathway, str_connector, ','.join(key_enzyme_group))
+                key_str_cutoff = current_mag_KeyEnzymeCpl_cutoff[current_key_str]
+                if (len(key_enzyme_group_detected) * 100 / len(key_enzyme_group)) >= key_str_cutoff:
+                    current_pathway_key_enzyme_qualified.append('yes')
+                else:
+                    current_pathway_key_enzyme_qualified.append('no')
+
+            if 'yes' in current_pathway_key_enzyme_qualified:
+                if mag not in mag_to_qualified_pwys_dict:
+                    mag_to_qualified_pwys_dict[mag] = [pathway]
+                else:
+                    mag_to_qualified_pwys_dict[mag].append(pathway)
+
+
+    ###################################################### Gapseq ######################################################
+
+    report_and_log(('Running Gapseq for %s genomes with %s cores' % (len(mag_to_qualified_pwys_dict), num_threads)), pwd_log_file, keep_quiet)
+
+    os.mkdir(gapseq_output_folder)
+
+    # prepare argument list for GapSeq worker
+    cmd_file_gapseq_handle = open(cmd_file_gapseq, 'w')
+    cmd_file_gapseq_handle.write('cd %s\n' % gapseq_output_folder)
+    argument_list_for_gapseq_worker = []
+    for qualified_genome in mag_to_qualified_pwys_dict:
+
+        qualified_genome_taxon = 'Bacteria'  # Archaea
+        if qualified_genome in genome_taxon_dict:
+            if genome_taxon_dict[qualified_genome] == 'Archaea':
+                qualified_genome_taxon = 'Archaea'
+
+        qualified_pwys = mag_to_qualified_pwys_dict[qualified_genome]
+        pwd_genome_file = '%s/%s.%s' % (genome_folder, qualified_genome, genome_ext)
+        if not pwd_genome_file.startswith('/'):
+            pwd_genome_file = '../../%s' % pwd_genome_file
+
+        for qualified_pwy in qualified_pwys:
+            gapseq_cmd = ''
+            if qualified_genome_taxon == 'Bacteria':
+                gapseq_cmd = '%s find -p %s -b 100 -z 2 %s > %s-%s-stdout.tbl' % (gapseq_exe, qualified_pwy, pwd_genome_file, qualified_genome, qualified_pwy)
+            if qualified_genome_taxon == 'Archaea':
+                gapseq_cmd = '%s find -p %s -b 100 -t %s -z 2 %s > %s-%s-stdout.tbl' % (gapseq_exe, qualified_pwy, qualified_genome_taxon, pwd_genome_file, qualified_genome, qualified_pwy)
+
+            cmd_file_gapseq_handle.write('%s\n' % gapseq_cmd)
+            argument_list_for_gapseq_worker.append(gapseq_cmd)
+    cmd_file_gapseq_handle.close()
+
+    # run GapSeq with multiprocessing
+    os.chdir(gapseq_output_folder)
+    pool = mp.Pool(processes=num_threads)
+    pool.map(os.system, argument_list_for_gapseq_worker)
+    pool.close()
+    pool.join()
+    os.chdir('../../')
+
+    report_and_log(('Commands for running Gapseq exported to %s' % os.path.basename(cmd_file_gapseq)), pwd_log_file, keep_quiet)
+
+    # combine Pathways files
+    os.mkdir(gapseq_output_folder_combined_Pathways)
+    for each_mag in mag_to_qualified_pwys_dict:
+        combine_cmd = 'cat %s/%s-*-Pathways.tbl > %s/%s-combined-Pathways.tbl' % (gapseq_output_folder, each_mag, gapseq_output_folder_combined_Pathways, each_mag)
+        os.system(combine_cmd)
+
+
+    # parse GapSeq outputs
+    pwy_completeness_dict = {}
+    for each_gapseq_output in intersect_file_list:
+
+        pwd_gapseq_output = '%s/%s-combined-Pathways.tbl' % (gapseq_output_folder_combined_Pathways, each_gapseq_output)
+
+        if os.path.isfile(pwd_gapseq_output) is False:
+            pwy_completeness_dict[each_gapseq_output] = {}
+        else:
+            current_genome_pwy_completeness_dict = {}
+            with open(pwd_gapseq_output, 'r') as f:
+                for line in f:
+                    if line.startswith('#'):
+                         continue
+                    each_pwy_split = line.strip().split('\t')
+                    if each_pwy_split and each_pwy_split[0] == 'ID':
+                        continue
+                    if len(each_pwy_split) >= 7:
+                        pwy_id = each_pwy_split[0].replace('|', '')
+                        try:
+                            completeness = float(each_pwy_split[3])
+                            KeyReactions = int(each_pwy_split[5])
+                            KeyReactionsFound = int(each_pwy_split[6])
+                            if KeyReactions == KeyReactionsFound:
+                                current_genome_pwy_completeness_dict[pwy_id] = float(completeness)
+                            else:
+                                current_genome_pwy_completeness_dict[pwy_id] = 0
+                        except (ValueError, IndexError):
+                            print(f"Error processing line: {line}")
+                            print(f"each_pwy_split: {each_pwy_split}")
+                            continue
+                    else:
+                        print(f"Unexpected number of fields in line: {line}")
+                        print(f"each_pwy_split: {each_pwy_split}")
+                        continue
+                    pwy_completeness_dict[each_gapseq_output] = current_genome_pwy_completeness_dict
+
+
+    ##################################################### write out ####################################################
+
+    report_and_log(('Preparing data matrix'), pwd_log_file, keep_quiet)
+
+    pwys_to_detect = sorted([i for i in pwy_to_key_enzyme_dict])
+    output_df_1_handle = open(output_df_1, 'w')
+    output_df_2_handle = open(output_df_2, 'w')
+    header_list = ['Genome']
+    header_printed = False
+    for genome in sorted(intersect_file_list):
+        current_genome_value_list   = [genome]
+        current_genome_value_list_2 = [genome]
+        for pwy in pwys_to_detect:
+
+            # get current pathway key enzyme info
+            current_pathway_key_enzymes = pwy_to_key_enzyme_dict[pwy]
+            current_pathway_key_enzymes_value = []
+            for key_enzyme_g in current_pathway_key_enzymes:
+                key_enzyme_g_value = []
+                for key_enzyme in key_enzyme_g:
+                    if key_enzyme in mag_to_key_enzymes_dict[genome]:
+                        key_enzyme_g_value.append('1')
+                    else:
+                        key_enzyme_g_value.append('0')
+                current_pathway_key_enzymes_value.append(key_enzyme_g_value)
+
+            key_enzyme_header_to_write = '_v_'.join(['_n_'.join(i) for i in current_pathway_key_enzymes])
+            key_enzyme_value_to_write  = '_v_'.join(['_n_'.join(i) for i in current_pathway_key_enzymes_value])
+
+            if header_printed is False:
+                header_list.append('%s__%s' % (pwy, key_enzyme_header_to_write))
+                header_list.append('%s_cpl' % pwy)
+                header_list.append('%s_found' % pwy)
+
+            # get current pathway completeness info
+            current_pathway_completeness_value = 'na'
+            if pwy in pwy_completeness_dict[genome]:
+                current_pathway_completeness_value = pwy_completeness_dict[genome][pwy]
+
+            # determine if current pathway exist
+            current_pathway_existence = '0'
+            if current_pathway_completeness_value != 'na':
+                current_pathway_existence_list = []
+                for key_enzyme_g in current_pathway_key_enzymes:
+                    cpl_key_str = '%s%s%s' % (pwy, str_connector, ','.join(key_enzyme_g))
+
+                    #  get current_pathway_completeness_cutoff
+                    if dynamic_pcc is True:
+                        current_pathway_completeness_cutoff = dynamic_PwyCpl_cutoff_dict[genome][cpl_key_str]
+                    else:
+                        current_pathway_completeness_cutoff = default_PwyCpl_cutoff_dict[cpl_key_str]
+
+                    if current_pathway_completeness_value >= current_pathway_completeness_cutoff:
+                        current_pathway_existence_list.append('1')
+                    else:
+                        current_pathway_existence_list.append('0')
+
+                if '1' in current_pathway_existence_list:
+                    current_pathway_existence = '1'
+
+            # get write out list
+            current_genome_value_list.append(key_enzyme_value_to_write)
+            current_genome_value_list.append(current_pathway_completeness_value)
+            current_genome_value_list.append(current_pathway_existence)
+            current_genome_value_list_2.append(current_pathway_existence)
+
+        # turn elements in write out list to string
+        current_genome_value_list_str = [str(i) for i in current_genome_value_list]
+        current_genome_value_list_2_str = [str(i) for i in current_genome_value_list_2]
+
+        # write out header
+        if header_printed is False:
+            output_df_1_handle.write('\t'.join(header_list) + '\n')
+            output_df_2_handle.write('Genome\t' + ' \t'.join(pwys_to_detect) + '\n')
+            header_printed = True
+
+        # write out value
+        output_df_1_handle.write('\t'.join(current_genome_value_list_str) + '\n')
+        if '1' in current_genome_value_list_2_str:
+            output_df_2_handle.write('\t'.join(current_genome_value_list_2_str) + '\n')
+
+    # close file handles
+    output_df_1_handle.close()
+    output_df_2_handle.close()
+
+    # final report
+    report_and_log(('Detections exported to %s and %s' % (os.path.basename(output_df_1), os.path.basename(output_df_2))), pwd_log_file, keep_quiet)
+    report_and_log(('Done!'), pwd_log_file, keep_quiet)
+
+
+######################################################### main #########################################################
+
+if __name__ == '__main__':
+
+    detectCFP_parser = argparse.ArgumentParser(description='Detect carbon fixation pathways', usage=detectCFP_usage)
+
+    # arguments for detectCFP
+    detectCFP_parser.add_argument('-p',             required=False, default=None,                help='output prefix')
+    detectCFP_parser.add_argument('-g',             required=True,                               help='genome folder')
+    detectCFP_parser.add_argument('-x',             required=False, default='fasta',             help='genome file extension, default: fasta')
+    detectCFP_parser.add_argument('-faa',           required=False, default=None,                help='faa files, requires Prodigal if not provided')
+    detectCFP_parser.add_argument('-hmm',           required=True,                               help='hmm profiles')
+    detectCFP_parser.add_argument('-k',             required=True,                               help='pathway to hmm profiles')
+    detectCFP_parser.add_argument('-e',             required=False, default='1e-99',             help='evalue cutoff for hmmsearch, default: 1e-99')
+    detectCFP_parser.add_argument('-gapseq_b',      required=False, default='200',               help='Bit score cutoff for GapSeq, default: 200')
+    detectCFP_parser.add_argument('-dynamic_kecc',  required=False, action="store_true",         help='use genome specific key enzyme completeness cutoff')
+    detectCFP_parser.add_argument('-dynamic_pcc',   required=False, action="store_true",         help='use genome specific pathway completeness cutoff')
+    detectCFP_parser.add_argument('-cpl',           required=False, default=None,                help='genome completeness, no header, no genome file extension, tab separated')
+    detectCFP_parser.add_argument('-taxon',         required=False, default=None,                help='genome domain, either Bacteria or Archaea, no header, no genome file extension, tab separated')
+    detectCFP_parser.add_argument('-gapseq',        required=False, default='gapseq',            help='path to GapSeq executable file, default: gapseq')
+    detectCFP_parser.add_argument('-t',             required=False, type=int, default=1,         help='number of threads, default: 1')
+    detectCFP_parser.add_argument('-force',         required=False, action="store_true",         help='force overwrite existing results')
+    detectCFP_parser.add_argument('-quiet',         required=False, action="store_true",         help='not report progress')
+
+    args = vars(detectCFP_parser.parse_args())
+
+    detectCFP(args)
+
+
+pypi_cmds = '''
+alias twine='/Users/songweizhi/Library/Python/3.7/bin/twine'
+cd /Users/songweizhi/PycharmProjects/detectCFP
+rm -r build
+rm -r dist
+rm -r detectCFP.egg-info
+python setup.py sdist bdist_wheel
+twine upload dist/*
+
+pip3 install --upgrade detectCFP
+
+# for test
+~/PycharmProjects/detectCFP/bin/detectCFP2 -p Sponge -g mag_files_renamed -x fna -hmm combined.HMM -k pathwaysXhmmfiles.txt -force -faa faa_files -dynamic_pcc -dynamic_kecc
+'''
+
+
+'''
+Note:
+1. HMM id in the HMM file and the path2hmm file need to be consistent. 
+
+2. detectCFP.py will produce the faa files with Prodigal if they are not provided. if you already have them, you can specify with "-faa"
+
+3. You need to add your own pathways to gapseq's dat/custom_pwy.tbl file.
+
+4. The format of path2hmm file (tab separated columns):
+
+    Pwy	KeyEnzyme	PwyCpl	KeyEnzymeCpl
+    rTCA1	citas,citbs	86	100
+    rTCA2	CCSs,CCSL,CCL	90	100
+    4HB3HP	HBD_alignments	64	100
+    3HP	TIGR04253	69	100	
+    DC4HB	HBD_alignments	64	100	
+    CALVIN-PWY	PRK	69	100	
+    CALVIN-PWY	PRK2	69	100	
+    CODHb-PWY	MeTr_alignments	90	100	
+    CODHa-PWY	MeTr_alignments	90	100	
+
+    1) file header has to be "Pwy	KeyEnzyme	PwyCpl	KeyEnzymeCpl".
+    2) column 1: pathway id, no "|" at the two ends
+    3) column 2: key enzymes, if there are multiple key enzymes, separate by comma.
+    4) column 3: minimum pathway completeness for the pathway to be considered as existing in complete genome.
+    5) column 4: minimum key enzyme completeness for the pathway to be considered as existing in complete genome.
+
+5.  MAG completeness file format (-cpl): no header, no mag file extension, tab separated
+    mag_1	97.57
+    mag_2	74.21
+    mag_3	100
+
+6.  MAG taxonomy file format (-taxon): choose from Bacteria/Archaea, no header, no mag file extension, tab separated
+    mag_1	Archaea
+    mag_2	Archaea
+    mag_3	Bacteria
+ 
+7. final output 1:
+    1) each pathway in the final output has three columns: PWY_HMM, PWY_completeness and PWY_found
+    2) PWY_HMM: "_n_" refers to "and " and "_v_" refers to "or ".
+    3) PWY_cpl: Gapseq provided pathway completeness
+    4) PWY_found: "1" for detected and "0" for not.
+
+8. final output 2: presence/absence of pathways among MAGs.
+
+'''

@@ -1,0 +1,41 @@
+
+
+## create .txt files for MAG cpl (MAG completeness) and MAG taxonomy from checkm1 output
+
+module load python/3.10.8
+module load perl/5.36.0
+module load blast-plus/2.12.0
+module load hmmer/3.3
+module load prodigal/2.6.3
+module load git/2.38.1
+module load bedtools2/2.30.0
+module load glpk/4.65
+module load barrnap/0.9
+module load gcc/12.2.0
+module load exonerate/2.4.0
+module load parallel/20220522
+module unload R
+module load r/4.2.2
+module load cplex/12.9.0
+
+# change directory to working directory 
+cd /path/to/working/directory
+
+# run script
+python3 detectCFP_12.py -p CFP_output -g /path/to/MAGs_fna/ -x fna -hmm combined.HMM -k pathwaysXhmmfiles.txt -t 12 -taxon MAG_taxonomy.txt -faa /path/to/MAGs_faa/ -gapseq /path/to/gapseq -dynamic_pcc -cpl MAG_cpl.txt
+
+
+
+
+# Full pathway analysis of those MAGs which had a predicted carbon fixation pathway
+
+eval "$(conda shell.bash hook)"
+conda activate gapseq
+
+module load glpk/4.65
+export R_LD_LIBRARY_PATH="`R RHOME`/lib:/usr/local/lib"
+
+/path/to/gapseq find -p all -M prot -t Bacteria -n MAG_ID.faa
+	or
+/path/to/gapseq find -p all -M prot -t Archaea -n MAG_ID.faa
+

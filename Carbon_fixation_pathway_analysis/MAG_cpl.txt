@@ -1,0 +1,6 @@
+ignicoccus_hospitalis	98.06
+nitrosopumilus_maritimus	92.6
+cereibacter_sphaeroides	95.75
+chloroflexus_aurantiacus	100
+hydrogenobacter_thermophilus	98
+Chlorobium_limicola	98.65
