@@ -1,0 +1,37 @@
+#PBS -N triage_shortreads
+#PBS -l select=1:ncpus=12:mem=120gb
+#PBS -l walltime=12:00:00
+#PBS -M your@email.address
+#PBS -m ae
+#PBS -j oe
+#PBS -o /path/to/triage_shortreads_report
+
+module load bbmap/38.63
+module load r/4.2.2
+
+
+cd /path/to/reassembled_mags/
+
+
+### Steps are 
+###   calculating coverage of each contig in the reassembled MAG using bbmap
+###   collect names of contigs matching desired length and coverage via the triage_shortreads script
+###   filter the original MAG to keep just those contigs
+###   collate the number of contigs and genome size of each triaged MAG
+
+ls *.fasta > list.txt
+
+
+for FILE in `cat list.txt`; do 
+
+	bbmap.sh ref=$FILE nodisk minid=0.95 threads=12 -Xmx100g in=/path/to/trimmed_reads/DATASET1_1_trimmed.fq in2=/path/to/trimmed_reads/DATASET1_2_trimmed.fq covstats=covstats_$FILE.txt twocolumn=t >> $FILE.log 2>&1
+	awk -v FS='\t' -v OFS='\t' '{print $0, $1}' covstats_$FILE.txt > covstats_$FILE.output
+	sed 's/_length_/	/2' < covstats_$FILE.output | sed 's/_cov_/	/2' | \
+		sed 's/#ID/node	length	kmerCov/2' > covstats_$FILE.processed.txt
+
+	Rscript /path/to/triage_shortreads.R covstats_$FILE.processed.txt $FILE
+	cut -f 1 collected.$FILE | sed 's/"//g' > collected_ready_$FILE
+	mv collected_ready_$FILE collected_ready_$FILE.txt
+	filterbyname.sh in=$FILE out=filt.$FILE names=collected_ready_$FILE.txt include=t
+	echo "filt.$FILE	`stats.sh filt.$FILE | grep "All" | cut -f 2,4` " >> reassem_triage_stats.txt
+done

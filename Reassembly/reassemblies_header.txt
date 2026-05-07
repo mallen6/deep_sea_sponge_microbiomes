@@ -1,0 +1,15 @@
+#!/bin/bash
+
+#PBS -N reassembly_SpongeID
+#PBS -l select=1:ncpus=24:mem=240gb
+#PBS -l walltime=99:00:00
+#PBS -M your@email.address
+#PBS -m ae
+#PBS -j oe
+
+
+eval "$(conda shell.bash hook)"
+conda activate flye_minimap_blast_BioSAK
+
+
+cd /path/to/SpongeID/04-Reassembly

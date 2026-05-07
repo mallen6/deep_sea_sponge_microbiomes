@@ -1,0 +1,79 @@
+#!/bin/bash
+
+#PBS -N triage_polish_proovframe
+#PBS -l select=1:ncpus=12:mem=120gb
+#PBS -l walltime=48:00:00
+#PBS -M your@email.address
+#PBS -m ae
+#PBS -j oe
+#PBS -o /path/to/triage_polish_proovfram_report
+
+eval "$(conda shell.bash hook)"
+conda activate nanophase2
+
+module load bbmap/38.63
+module load r/4.2.2
+module load seqtk
+module load diamond/2.1.6
+
+cd /path/to/reassembled_mags/
+
+
+####### Running triage script to filter the reassembled bins ############
+ls -d flye_reassemble_asm_bin.*.ed > folders
+cat folders | sed 's/flye_reassemble_asm_//g' | sed 's/.ed//g' > binIDs.txt
+
+for i in `cat binIDs.txt`; do 
+	cd flye_reassemble_asm_$i.ed
+	Rscript /path/to/triage.R assembly_info.txt $i
+	cut -f 1 collected.$i | sed 's/"//g' > collected_ready
+	filterbyname.sh in=assembly.fasta out=filt.$i.fasta names=collected_ready include=t
+	mv filt.$i.fasta ../
+	cd ../
+	done
+
+mkdir filtered_asm_bins
+mv filt.bin.*.fasta filtered_asm_bins/
+
+cd filtered_asm_bins/
+for FILE in filt.bin.*.fasta; 
+	do echo "$FILE	`grep ">" $FILE | wc -l`	`grep -v ">" $FILE | wc -m` " >> reassem_stats.txt; 
+	done
+
+####### Polishing the reassembled bins ############
+
+ls *.fasta | sed 's/filt.//g' | sed 's/.fasta//g' > list.txt
+for BIN in `cat list.txt`; do
+	minimap2 -x map-ont -d filt."$BIN".fasta.mmi filt."$BIN".fasta
+	minimap2 -x map-ont -t 12 filt."$BIN".fasta.mmi /path/to/pure_barcodeID.fastq.gz > "$BIN"-mapping.lr.paf
+	awk '!a[$1]++' "$BIN"-mapping.lr.paf | awk -F'[:\t]' '($4-$3+1)/$2 >=0.90 && $27<0.10 {print $1"\t"$6}' > "$BIN"-filtered_90_90-lr.paf
+        cut -f 1 "$BIN"-filtered_90_90-lr.paf > "$BIN"-lr.IDs
+
+        seqtk subseq /path/to/pure_barcodeID.fastq.gz "$BIN"-lr.IDs > "$BIN"-lr.fq
+
+
+        minimap2 -a -x map-ont -t 12 filt."$BIN".fasta.mmi "$BIN"-lr.fq > "$BIN"-overlaps.racon1.sam
+        racon -t 12 "$BIN"-lr.fq "$BIN"-overlaps.racon1.sam filt."$BIN".fasta > "$BIN"-racon01.fasta
+
+        medaka_consensus -m r104_e81_sup_g610 -i "$BIN"-lr.fq -d "$BIN"-racon01.fasta -o "$BIN"-medaka -t 12
+        cp "$BIN"-medaka/consensus.fasta "$BIN"-polished.fasta
+	rm "$BIN"-racon01.fasta
+        
+done
+
+######## Move the original bins here too, then run prooveframe on original and reassembled-polished MAGs #########
+cp /path/to/orig_bins/*.ed.fasta ./
+ls *.ed.fasta > list4.txt
+ls *polished.fasta >> list4.txt
+
+
+for FILE in `cat list4.txt`; do
+	echo "Starting $FILE"; 
+	/path/to/proovframe map -t 12 -d /path/to/uniref90.dmnd -o '"$FILE"'_v_uniref90_2023_fast.o6 -m fast '"$FILE"'; 
+	/path/to/proovframe fix -o '"$FILE"'_fixed.fasta '"$FILE"' '"$FILE"'_v_uniref90_2023_fast.o6 >> '"$FILE"'.log 2>&1; 
+	echo "Finished $FILE"; 
+	echo "\n";
+done
+
+rename .fasta_fixed.fasta .fixed.fasta *.fasta_fixed.fasta
+
