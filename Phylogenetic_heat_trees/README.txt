@@ -6,4 +6,4 @@
 # 
 #     metacoder_27sponges.R 
 #
-# used to generate phylogenetic heat trees for each sponge microbiome.
+# used to generate taxonomic heat trees for each sponge microbiome.
