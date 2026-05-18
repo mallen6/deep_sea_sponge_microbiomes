@@ -3,7 +3,7 @@ A repository of scripts for working with deep sea sponge microbiomes.
 
 Custom code and example scripts are available for 
   1. MAG reassembly
-  2. producing phylogenetic heat trees
+  2. producing taxonomic heat trees
   3. detecting carbon fixation pathways
   4. vOTU analysis
 
