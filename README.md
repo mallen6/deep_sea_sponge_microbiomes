@@ -2,8 +2,8 @@
 A repository of scripts for working with deep-sea sponge microbiomes. 
 
 Custom code and example scripts are available for 
-  1. Assembly and binning of MAGs
-  2. detecting carbon fixation pathways
+  1. Re-assembly of MAGs
+  2. Detecting carbon fixation pathways
   3. vOTU analysis
 
 These methods were used for the analysis of 27 deep-sea sponge microbiomes, as described in our paper:
